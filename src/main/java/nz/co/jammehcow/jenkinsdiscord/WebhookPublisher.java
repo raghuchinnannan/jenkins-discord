@@ -1,8 +1,10 @@
 package nz.co.jammehcow.jenkinsdiscord;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import hudson.EnvVars;
 import hudson.Extension;
 import hudson.Launcher;
+import hudson.matrix.MatrixConfiguration;
 import hudson.model.AbstractBuild;
 import hudson.model.AbstractProject;
 import hudson.model.BuildListener;
@@ -15,11 +17,11 @@ import hudson.util.FormValidation;
 import jenkins.model.JenkinsLocationConfiguration;
 import nz.co.jammehcow.jenkinsdiscord.exception.WebhookException;
 import nz.co.jammehcow.jenkinsdiscord.util.EmbedDescription;
-
-import java.io.IOException;
-
 import org.kohsuke.stapler.DataBoundConstructor;
 import org.kohsuke.stapler.QueryParameter;
+
+import java.io.IOException;
+import java.util.Map;
 
 /**
  * Author: jammehcow.
@@ -36,7 +38,7 @@ public class WebhookPublisher extends Notifier {
     private final boolean enableArtifactList;
     private final boolean enableFooterInfo;
     private static final String NAME = "Discord Notifier";
-    private static final String VERSION = "1.3.0";
+    private static final String VERSION = "1.4.4";
 
     @DataBoundConstructor
     public WebhookPublisher(String webhookURL, String thumbnailURL, boolean sendOnStateChange, String statusTitle, String branchName, boolean enableUrlLinking, boolean enableArtifactList, boolean enableFooterInfo) {
@@ -53,6 +55,10 @@ public class WebhookPublisher extends Notifier {
     public String getWebhookURL() { return this.webhookURL; }
     public String getBranchName() { return this.branchName; }
     public String getStatusTitle() { return this.statusTitle; }
+
+    public String getThumbnailURL() {
+        return this.thumbnailURL;
+    }
     public boolean isSendOnStateChange() { return this.sendOnStateChange; }
     public boolean isEnableUrlLinking() { return this.enableUrlLinking; }
     public boolean isEnableArtifactList() { return this.enableArtifactList; }
@@ -61,11 +67,21 @@ public class WebhookPublisher extends Notifier {
     @Override
     public boolean needsToRunAfterFinalized() { return true; }
 
+    //TODO clean this function
+    @SuppressFBWarnings(value = "NP_NULL_ON_SOME_PATH_FROM_RETURN_VALUE")
     @Override
     public boolean perform(AbstractBuild build, Launcher launcher, BuildListener listener) throws IOException, InterruptedException {
-    	final EnvVars env = build.getEnvironment(listener);
-    	// The global configuration, used to fetch the instance url
-        JenkinsLocationConfiguration globalConfig = new JenkinsLocationConfiguration();
+        final EnvVars env = build.getEnvironment(listener);
+        // The global configuration, used to fetch the instance url
+        JenkinsLocationConfiguration globalConfig = JenkinsLocationConfiguration.get();
+        if (globalConfig == null) {
+            listener.getLogger().println("[Discord Notifier] JenkinsLocationConfiguration is null!");
+            return true;
+        }
+        if (build.getResult() == null) {
+            listener.getLogger().println("[Discord Notifier] build.getResult() is null!");
+            return true;
+        }
 
         // Create a new webhook payload
         DiscordWebhook wh = new DiscordWebhook(env.expand(this.webhookURL));
@@ -83,53 +99,71 @@ public class WebhookPublisher extends Notifier {
         }
 
         if (this.sendOnStateChange) {
-            if (build.getResult().equals(build.getPreviousBuild().getResult())) {
+            if (build.getPreviousBuild() != null && build.getResult().equals(build.getPreviousBuild().getResult())) {
                 // Stops the webhook payload being created if the status is the same as the previous
                 return true;
             }
         }
 
-        boolean buildStatus = build.getResult().isBetterOrEqualTo(Result.SUCCESS);
+        DiscordWebhook.StatusColor statusColor = DiscordWebhook.StatusColor.GREEN;
+        Result buildresult = build.getResult();
+        if (!buildresult.isCompleteBuild()) return true;
+        if (buildresult.isBetterOrEqualTo(Result.SUCCESS)) statusColor = DiscordWebhook.StatusColor.GREEN;
+        if (buildresult.isWorseThan(Result.SUCCESS)) statusColor = DiscordWebhook.StatusColor.YELLOW;
+        if (buildresult.isWorseThan(Result.UNSTABLE)) statusColor = DiscordWebhook.StatusColor.RED;
 
-        if (!this.statusTitle.isEmpty()) {
+        AbstractProject project = build.getProject();
+        StringBuilder combinationString = new StringBuilder();
+        if (this.statusTitle != null && !this.statusTitle.isEmpty()) {
             wh.setTitle(env.expand(this.statusTitle));
         } else {
-            wh.setTitle(build.getProject().getDisplayName() + " #" + build.getId());
+            wh.setTitle(project.getDisplayName() + " #" + build.getId());
         }
 
-
-        String descriptionPrefix;
+        //Check if MatrixConfiguration
+        if (project instanceof MatrixConfiguration) {
+            wh.setTitle(project.getParent().getDisplayName() + " #" + build.getId());
+            combinationString.append("**Configuration matrix:**\n");
+            for (Map.Entry e : ((MatrixConfiguration) project).getCombination().entrySet())
+                combinationString.append(" - ").append(e.getKey()).append(": ").append(e.getValue()).append("\n");
+        }
 
         String branchNameString ="";
-        if (!branchName.isEmpty()) {
+        if (branchName != null && !branchName.isEmpty()) {
             branchNameString = "**Branch:** "+env.expand(branchName)+"\n";
         }
 
+        String descriptionPrefix;
         // Adds links to the description and title if enableUrlLinking is enabled
         if (this.enableUrlLinking) {
             String url = globalConfig.getUrl() + build.getUrl();
             descriptionPrefix = branchNameString
-            	+"**Build:** "
-                + getMarkdownHyperlink(build.getId(), url)
-                + "\n**Status:** "
-                + getMarkdownHyperlink(build.getResult().toString().toLowerCase(), url);
+                    + "**Build:** "
+                    + getMarkdownHyperlink(build.getId(), url)
+                    + "\n**Status:** "
+                    + getMarkdownHyperlink(build.getResult().toString().toLowerCase(), url) + "\n";
             wh.setURL(url);
         } else {
             descriptionPrefix = branchNameString
-            	    + "**Build:** "
+                    + "**Build:** "
                     + build.getId()
                     + "\n**Status:** "
-                    + build.getResult().toString().toLowerCase();
+                    + build.getResult().toString().toLowerCase() + "\n";
         }
+        descriptionPrefix += combinationString;
 
         wh.setThumbnail(thumbnailURL);
         wh.setDescription(new EmbedDescription(build, globalConfig, descriptionPrefix, this.enableArtifactList).toString());
-        wh.setStatus(buildStatus);
+        wh.setStatus(statusColor);
 
         if (this.enableFooterInfo) wh.setFooter("Jenkins v" + build.getHudsonVersion() + ", " + getDescriptor().getDisplayName() + " v" + getDescriptor().getVersion());
 
-        try { wh.send(); }
-        catch (WebhookException e) { e.printStackTrace(); }
+        try {
+            listener.getLogger().println("Sending notification to Discord.");
+            wh.send();
+        } catch (WebhookException e) {
+            e.printStackTrace(listener.getLogger());
+        }
 
         return true;
     }
@@ -146,7 +180,7 @@ public class WebhookPublisher extends Notifier {
         public boolean isApplicable(Class<? extends AbstractProject> aClass) { return true; }
 
         public FormValidation doCheckWebhookURL(@QueryParameter String value) {
-            if (!value.matches("https://discordapp\\.com/api/webhooks/\\d{18}/(\\w|-|_)*(/?)"))
+            if (!value.matches("https://(canary\\.|ptb\\.|)discordapp\\.com/api/webhooks/\\d{18}/(\\w|-|_)*(/?)"))
                 return FormValidation.error("Please enter a valid Discord webhook URL.");
             return FormValidation.ok();
         }
@@ -157,6 +191,7 @@ public class WebhookPublisher extends Notifier {
     }
     
     private static String getMarkdownHyperlink(String content, String url) {
+        url = url.replaceAll("\\)", "\\\\\\)");
         return "[" + content + "](" + url + ")";
     }
 }

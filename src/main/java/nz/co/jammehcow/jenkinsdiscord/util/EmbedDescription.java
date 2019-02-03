@@ -32,9 +32,13 @@ public class EmbedDescription {
         } else {
             for (Object o : changes) {
                 ChangeLogSet.Entry entry = (ChangeLogSet.Entry) o;
-                String commitID = (entry.getParent().getKind().equalsIgnoreCase("svn")) ? entry.getCommitId() : entry.getCommitId().substring(0, 6);
+                String commitID;
+                if (entry.getCommitId() == null) commitID = "null";
+                else if (entry.getCommitId().length() < 6) commitID = entry.getCommitId();
+                else commitID = entry.getCommitId().substring(0, 6);
 
-                this.changesList.add("   - ``" + commitID + "`` *" + entry.getMsg() + " - " + entry.getAuthor().getFullName() + "*\n");
+                this.changesList.add(String.format("   - ``%s`` *%s - %s*%n",
+                        commitID, entry.getMsg(), entry.getAuthor().getFullName()));
             }
         }
 
